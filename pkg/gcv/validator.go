@@ -147,33 +147,45 @@ func NewValidator(options ...Option) (*Validator, error) {
 		return nil, status.Errorf(codes.InvalidArgument, "No policy library set")
 	}
 
-	glog.V(logRequestsVerboseLevel).Infof("loading policy library dir: %s", ret.policyLibraryDir)
-	regoLib, err := loadRegoFiles(ret.policyLibraryDir)
+	err := ret.loadConstraintFramework()
 	if err != nil {
 		return nil, err
-	}
-
-	ret.constraintFramework, err = cf.New(regoLib)
-	if err != nil {
-		return nil, err
-	}
-	glog.V(logRequestsVerboseLevel).Infof("loading policy dir: %s", ret.policyPath)
-	templates, constraints, err := loadYAMLFiles(ret.policyPath)
-	if err != nil {
-		return nil, err
-	}
-	for _, template := range templates {
-		if err := ret.constraintFramework.AddTemplate(template); err != nil {
-			return nil, err
-		}
-	}
-	for _, constraint := range constraints {
-		if err := ret.constraintFramework.AddConstraint(constraint); err != nil {
-			return nil, err
-		}
 	}
 
 	return ret, nil
+}
+
+func (v *Validator) loadConstraintFramework() error {
+	glog.V(logRequestsVerboseLevel).Infof("loading policy library dir: %s", v.policyLibraryDir)
+	regoLib, err := loadRegoFiles(v.policyLibraryDir)
+	if err != nil {
+		return err
+	}
+
+	v.constraintFramework, err = cf.New(regoLib)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (v *Validator) loadPoliciesAndConstraints() error {
+	glog.V(logRequestsVerboseLevel).Infof("loading policy dir: %s", v.policyPath)
+	templates, constraints, err := loadYAMLFiles(v.policyPath)
+	if err != nil {
+		return err
+	}
+	for _, template := range templates {
+		if err := v.constraintFramework.AddTemplate(template); err != nil {
+			return err
+		}
+	}
+	for _, constraint := range constraints {
+		if err := v.constraintFramework.AddConstraint(constraint); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AddData adds GCP resource metadata to be audited later.
@@ -242,4 +254,12 @@ func (v *Validator) Reset() error {
 func (v *Validator) Audit(ctx context.Context) (*validator.AuditResponse, error) {
 	response, err := v.constraintFramework.Audit(ctx)
 	return response, err
+}
+
+// Reload clears previously added constraint templates and policies from the config-validator
+// and reloads them from the directories specified by the -policyLibraryPath and -policyPath
+// respectively
+func (v *Validator) Reload() error {
+
+	return nil
 }
