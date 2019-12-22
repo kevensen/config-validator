@@ -523,11 +523,34 @@ func convertLegacyConstraint(u *unstructured.Unstructured) error {
 type Configuration struct {
 	Templates   []*cftemplates.ConstraintTemplate
 	Constraints []*unstructured.Unstructured
+	Libs        []string
+}
+
+func loadRegoFiles(dir string) ([]string, error) {
+	var libs []string
+	files, err := ListRegoFiles(dir)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to list rego files from %s", dir)
+	}
+	for _, filePath := range files {
+		glog.V(2).Infof("Loading rego file: %s", filePath)
+		fileBytes, err := ioutil.ReadFile(filePath)
+		if err != nil {
+			return nil, errors.Wrapf(err, "unable to read file %s", filePath)
+		}
+		libs = append(libs, string(fileBytes))
+	}
+	return libs, nil
 }
 
 // NewConfiguration returns the configuration from the list of provided directories.
-func NewConfiguration(dirs []string, regoLib []string) (*Configuration, error) {
+func NewConfiguration(dirs []string, libDir string) (*Configuration, error) {
 	unstructuredObjects, err := loadUnstructured(dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	regoLib, err := loadRegoFiles(libDir)
 	if err != nil {
 		return nil, err
 	}
