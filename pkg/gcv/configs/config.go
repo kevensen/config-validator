@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,16 @@ func init() {
 	utilruntime.Must(cfapis.AddToScheme(scheme.Scheme))
 }
 
+func configGCSClient() (client *storage.Client) {
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return client
+}
+
 type yamlFile struct {
 	source       string // helpful information to rediscover this data
 	yaml         *simpleyaml.Yaml
@@ -73,6 +84,7 @@ const (
 var (
 	// templateGK is the GroupKind for ConstraintTemplate types.
 	templateGK = schema.GroupKind{Group: cfv1alpha1.SchemeGroupVersion.Group, Kind: "ConstraintTemplate"}
+	client     = configGCSClient()
 )
 
 // UnclassifiedConfig stores loosely parsed information not specific to constraints or templates.
@@ -259,18 +271,8 @@ func listFilesLocal(dir string) ([]string, error) {
 // listFilesGCS returns a list of files under a dir in a GCS bucket. Errors will be grpc errors.
 func listFilesGCS(bucketPath string) ([]string, error) {
 	ctx := context.Background()
-	client, _ := storage.NewClient(ctx)
-
-	bucketPath = strings.ReplaceAll(bucketPath, "gs://", "")
-
-	delim := "/"
-
-	pathPieces := strings.Split(bucketPath, delim)
-
-	bucket := pathPieces[0]
-	prefix := strings.Join(pathPieces[1:], delim) + delim
-
 	var files []string
+	bucket, prefix := parseBucketPath(bucketPath)
 
 	it := client.Bucket(bucket).Objects(ctx, &storage.Query{
 		Prefix: prefix,
@@ -283,7 +285,7 @@ func listFilesGCS(bucketPath string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		fileName := "gs://" + bucket + delim + attrs.Name
+		fileName := "gs://" + bucket + "/" + attrs.Name
 		files = append(files, fileName)
 	}
 	return files, nil
@@ -380,6 +382,9 @@ func convertToProtoVal(from interface{}) (*pb.Value, error) {
 }
 
 func loadUnstructured(dirs []string) ([]*unstructured.Unstructured, error) {
+	var contents []byte
+	var err error
+
 	files, err := ListYAMLFilesD(dirs)
 	if err != nil {
 		return nil, err
@@ -387,7 +392,12 @@ func loadUnstructured(dirs []string) ([]*unstructured.Unstructured, error) {
 
 	var yamlDocs []*unstructured.Unstructured
 	for _, file := range files {
-		contents, err := ioutil.ReadFile(file)
+		if strings.HasPrefix(file, "gs://") {
+			contents, err = loadFileGCS(file)
+		} else {
+			contents, err = loadFileLocal(file)
+		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -528,19 +538,68 @@ type Configuration struct {
 
 func loadRegoFiles(dir string) ([]string, error) {
 	var libs []string
+	var content []byte
 	files, err := ListRegoFiles(dir)
+
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to list rego files from %s", dir)
 	}
 	for _, filePath := range files {
 		glog.V(2).Infof("Loading rego file: %s", filePath)
-		fileBytes, err := ioutil.ReadFile(filePath)
+
+		if strings.HasPrefix(filePath, "gs://") {
+			glog.V(2).Infof("Loading rego file from GCS: %s", filePath)
+			content, err = loadFileGCS(filePath)
+		} else {
+			glog.V(2).Infof("Loading rego file from local: %s", filePath)
+			content, err = loadFileLocal(filePath)
+		}
+
 		if err != nil {
 			return nil, errors.Wrapf(err, "unable to read file %s", filePath)
 		}
-		libs = append(libs, string(fileBytes))
+		libs = append(libs, string(content))
 	}
 	return libs, nil
+}
+
+func loadFileLocal(filePath string) ([]byte, error) {
+	fileBytes, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to read file %s", filePath)
+	}
+	return fileBytes, nil
+}
+
+func loadFileGCS(bucketPath string) ([]byte, error) {
+	ctx := context.Background()
+
+	bucket, object := parseBucketPath(bucketPath)
+	rc, err := client.Bucket(bucket).Object(object).NewReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	data, err := ioutil.ReadAll(rc)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+	// [END download_file]
+}
+
+func parseBucketPath(bucketPath string) (string, string) {
+	bucketPath = strings.ReplaceAll(bucketPath, "gs://", "")
+
+	delim := "/"
+
+	pathPieces := strings.Split(bucketPath, delim)
+
+	bucket := pathPieces[0]
+	path := strings.Join(pathPieces[1:], delim)
+
+	return bucket, path
 }
 
 // NewConfiguration returns the configuration from the list of provided directories.
