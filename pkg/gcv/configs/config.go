@@ -16,6 +16,7 @@
 package configs
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/forseti-security/config-validator/pkg/api/validator"
 	"github.com/ghodss/yaml"
+	"github.com/golang/glog"
 	"github.com/golang/protobuf/jsonpb"
 	pb "github.com/golang/protobuf/ptypes/struct"
 	cfapis "github.com/open-policy-agent/frameworks/constraint/pkg/apis"
@@ -40,6 +42,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/kubectl/pkg/scheme"
+
+	"google.golang.org/api/iterator"
+
+	"cloud.google.com/go/storage"
+)
+
+const (
+	logRequestsVerboseLevel = 2
 )
 
 func init() {
@@ -203,8 +213,30 @@ func arrayFilterSuffix(arr []string, suffix string) []string {
 	return filteredList
 }
 
-// listFiles returns a list of files under a dir. Errors will be grpc errors.
+// listFiles returns a list of files under a dir either locally or in GCS. Errors will be grpc errors.
 func listFiles(dir string) ([]string, error) {
+	var files []string
+	var err error
+
+	if strings.HasPrefix(dir, "gs://") {
+		files, err = listFilesGCS(dir)
+	} else {
+		files, err = listFilesLocal(dir)
+	}
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("Number of files: %d", len(files))
+	for _, file := range files {
+		glog.V(logRequestsVerboseLevel).Infof("File in list: %s", file)
+
+	}
+
+	return files, nil
+}
+
+// listFiles returns a list of files under a dir. Errors will be grpc errors.
+func listFilesLocal(dir string) ([]string, error) {
 	var files []string
 
 	visit := func(path string, f os.FileInfo, err error) error {
@@ -220,6 +252,39 @@ func listFiles(dir string) ([]string, error) {
 	err := filepath.Walk(dir, visit)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return files, nil
+}
+
+// listFilesGCS returns a list of files under a dir in a GCS bucket. Errors will be grpc errors.
+func listFilesGCS(bucketPath string) ([]string, error) {
+	ctx := context.Background()
+	client, _ := storage.NewClient(ctx)
+
+	bucketPath = strings.ReplaceAll(bucketPath, "gs://", "")
+
+	delim := "/"
+
+	pathPieces := strings.Split(bucketPath, delim)
+
+	bucket := pathPieces[0]
+	prefix := strings.Join(pathPieces[1:], delim) + delim
+
+	var files []string
+
+	it := client.Bucket(bucket).Objects(ctx, &storage.Query{
+		Prefix: prefix,
+	})
+	for {
+		attrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		fileName := "gs://" + bucket + delim + attrs.Name
+		files = append(files, fileName)
 	}
 	return files, nil
 }
@@ -242,7 +307,7 @@ func ListYAMLFilesD(dirs []string) ([]string, error) {
 	return arrayFilterSuffix(files, ".yaml"), nil
 }
 
-// ListRegoFiles returns a list of rego files under a dir. Errors will be grpc errors.
+//Files returns a list of rego files under a dir. Errors will be grpc errors.
 func ListRegoFiles(dir string) ([]string, error) {
 	files, err := listFiles(dir)
 	if err != nil {
